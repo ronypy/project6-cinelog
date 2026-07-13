@@ -1,5 +1,10 @@
 # PR Response Doc — CineLog Watchlist Feature
 
+## Commit History Screenshot
+`git log --oneline main..feature/watchlist` (7 commits, all conventional, no merges):
+
+![git log](gitlog-screenshot.png)
+
 ## AI Usage
 <!-- Filled in at the end -->
 
@@ -30,9 +35,25 @@
 **Engagement with reviewer's point:** Alphabetical was my original implementation, but I don't think it holds up against the consistency argument above — nothing in the current API (no search or filter params) makes alphabetical browsing specifically valuable, so there's no real use case being sacrificed by dropping it as the default. If a future need for alphabetical browsing does show up (e.g., a very long watchlist), I'd rather solve that with an explicit `?sort=` query param than by making the two features default to different orders.
 
 ## Comment 6 — Rebase
-**What conflicted:**
-**How I resolved it:**
-**How I verified no conflict remains:**
+**What conflicted:** `main` had merged a refactor (`refactor: migrate film IDs from integer to UUID`) that migrated `Film.id` and `CollectionEntry.film_id` from `db.Integer` to `db.String(36)`, and — since `WatchlistEntry` didn't exist on `main` at that point — deleted the `WatchlistEntry` class from `models.py` entirely on that branch. Git's three-way merge during `git rebase origin/main` auto-resolved `models.py` textually (no conflict markers), but the result silently dropped `WatchlistEntry` from the file, and `WatchlistEntry.film_id` was still typed as `db.Integer`, pointing at a `Film.id` that was now a UUID string. There was also a real text conflict in `.gitignore` (both branches added one independently).
+**How I resolved it:** For `.gitignore`, I merged both versions (kept `.pytest_cache/` from `main`'s version alongside the entries from my own commit). For `models.py`, I re-added the `WatchlistEntry` class after `CollectionEntry`, with `film_id` typed as `db.String(36)` to match the UUID refactor, and added a `Film.watchlist_entries` relationship (`db.relationship("WatchlistEntry", backref="film", lazy=True)`) — this was missing even before the rebase and caused `get_watchlist()` to throw `AttributeError: 'WatchlistEntry' object has no attribute 'film'` the first time I exercised the endpoint manually. I also updated stale docstrings/comments in `watchlist_service.py` and `routes/watchlist/watchlist.py` that described `film_id` as an integer.
+**How I verified no conflict remains:** Ran `git status` to confirm a clean rebase with no unresolved paths, `git log --oneline main..feature/watchlist` to confirm no merge commits, `pytest tests/ -v` (all 5 tests pass), and manually started the app (`python app.py`) to exercise `POST /watchlist/<user_id>/add` and `GET /watchlist/<user_id>` end-to-end with a real UUID film ID — including the duplicate (409) and nonexistent-film (404) cases — to confirm the UUID types and the film relationship work correctly together.
+
+## AI Usage (continued)
+I used AI assistance throughout this project for: reading `models.py`, `services/collection_service.py`, and `tests/test_collection.py` to understand the naming convention and deduplication pattern before touching any code (Milestone 1); confirming via `grep` that call sites were fully updated after the Comment 1 rename; and as a final check on `git log --oneline` output against the conventional commits spec before taking the screenshot. For Comments 4 and 5, I drafted my position first from CineLog's actual code and README, then asked AI to argue the counter-position (a reviewer favoring `public=False` by default, and a reviewer favoring alphabetical order) to check whether my reasoning held up. In Comment 4, this surfaced the "first-time user surprise" tradeoff I'd only stated weakly, which I sharpened into its own explicit line. In Comment 5, the counterargument didn't surface anything I hadn't already covered (no filter/search API exists yet to make alphabetical valuable), so I kept my original argument intact. I did not have AI write any of the deduplication logic, the design-decision positions, or the rebase conflict resolution — those reflect my own reasoning about this codebase.
 
 ## PR Description
-<!-- Written at the end — feature overview, design decisions, manual testing steps -->
+
+**What this feature does:** Adds a watchlist to CineLog — a list of films a user wants to watch later, separate from their collection of films already watched. Adds `POST /watchlist/<user_id>/add` to add a film to the watchlist (rejecting nonexistent films with 404 and duplicates with 409) and `GET /watchlist/<user_id>` to view it, sorted newest-first.
+
+**Design decisions made:**
+- **Default visibility:** New watchlist entries default to `public=True`, consistent with collections (which have no privacy toggle at all) and because a visible watchlist is what enables the app's social use cases (see Comment 4 for the full tradeoff discussion).
+- **Sort order:** `GET /watchlist/<user_id>` returns entries by `date_added` descending (newest first), matching `get_collection()`'s ordering, rather than alphabetically by title (see Comment 5).
+
+**How to manually test:**
+1. `pip install -r requirements.txt && python app.py`
+2. Create a user and film directly via a Python shell (`from app import create_app, db; from models import User, Film`) and note their generated UUIDs, since there's no seed data or signup endpoint yet.
+3. `POST /watchlist/<user_id>/add` with `{"film_id": "<uuid>"}` → expect `201` with the new entry (`public: true`, `date_added` set).
+4. `GET /watchlist/<user_id>` → expect the film returned with `date_added` and `public` fields, newest-first if you add more than one.
+5. Repeat step 3 with the same film_id → expect `409` (`AlreadyInWatchlistError`).
+6. Repeat step 3 with a random UUID not in the `film` table → expect `404` (`FilmNotFoundError`).
